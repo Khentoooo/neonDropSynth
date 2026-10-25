@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Neon Drop Synth</title>
+<style>
+  :root { --accent:#00f0ff; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#0a0a0f;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color:#dfe9ff; user-select:none; -webkit-user-select:none; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; cursor:crosshair; }
+
+  #panel { position:fixed; top:16px; left:16px; z-index:10; display:flex; flex-direction:column; gap:10px;
+    padding:14px; width:210px; border-radius:18px;
+    background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.14);
+    backdrop-filter:blur(16px) saturate(140%); -webkit-backdrop-filter:blur(16px) saturate(140%);
+    box-shadow:0 8px 32px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(255,255,255,0.03); }
+  #panel h1 { font-size:12px; letter-spacing:.28em; text-transform:uppercase; font-weight:600;
+    color:var(--accent); text-shadow:0 0 10px var(--accent); }
+  .group { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .label { font-size:10px; letter-spacing:.18em; text-transform:uppercase; opacity:.5; margin-top:2px; }
+  button { font:inherit; font-size:12px; color:#dfe9ff; cursor:pointer; padding:8px 6px; border-radius:10px;
+    background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); transition:all .18s ease; }
+  button:hover { background:rgba(255,255,255,0.12); border-color:rgba(255,255,255,0.3); transform:translateY(-1px); }
+  button:active { transform:translateY(0) scale(.97); }
+  button.active { color:#fff; border-color:var(--accent); background:rgba(0,240,255,0.16);
+    box-shadow:0 0 14px rgba(0,240,255,0.45), inset 0 0 8px rgba(0,240,255,0.25); }
+  .wide { grid-column:span 2; }
+  #hint { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); font-size:11px; letter-spacing:.12em;
+    opacity:.38; pointer-events:none; text-align:center; white-space:nowrap; z-index:5; }
+
+  #overlay { position:fixed; inset:0; z-index:100; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:22px;
+    background:radial-gradient(circle at 50% 40%, rgba(20,20,45,.92), rgba(10,10,15,.98)); cursor:pointer; transition:opacity .6s ease; }
+  #overlay.hide { opacity:0; pointer-events:none; }
+  #overlay h2 { font-size:clamp(28px,6vw,56px); font-weight:200; letter-spacing:.3em; text-transform:uppercase;
+    color:#fff; text-shadow:0 0 12px #00f0ff, 0 0 40px #ff2bd6; text-align:center; padding:0 16px; }
+  #overlay .btn { padding:14px 34px; border-radius:40px; font-size:14px; letter-spacing:.25em; text-transform:uppercase;
+    border:1px solid #00f0ff; color:#00f0ff; background:rgba(0,240,255,.08);
+    box-shadow:0 0 24px rgba(0,240,255,.4), inset 0 0 14px rgba(0,240,255,.2); animation:pulse 2s ease-in-out infinite; }
+  #overlay p { font-size:12px; opacity:.45; letter-spacing:.1em; }
+  @keyframes pulse { 50% { box-shadow:0 0 44px rgba(0,240,255,.8), inset 0 0 20px rgba(0,240,255,.35); } }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="panel">
+  <h1>Neon Drop Synth</h1>
+  <div class="label">Gravity</div>
+  <div class="group">
+    <button data-g="1" class="active">Normal</button>
+    <button data-g="0.25">Moon</button>
+    <button data-g="0">Zero-G</button>
+    <button data-g="-0.5">Reverse</button>
+  </div>
+  <div class="label">Machine</div>
+  <div class="group">
+    <button id="auto" class="wide">Auto-Spawner: Off</button>
+    <button id="add">+ Bumper</button>
+    <button id="clear">Clear</button>
+  </div>
+</div>
+
+<div id="hint">click empty space to drop a marble · drag bumpers · double-click a rectangle to rotate</div>
+
+<div id="overlay">
+  <h2>Neon Drop Synth</h2>
+  <div class="btn">Click to Start Synth</div>
+  <p>sound on · headphones recommended</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script>
+(() => {
+  const { Engine, Runner, Bodies, Body, Composite, Events, Query } = Matter;
+
+  /* ---------- Canvas ---------- */
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, dpr = 1;
+
+  /* ---------- Physics ---------- */
+  const engine = Engine.create();
+  const world = engine.world;
+  engine.gravity.y = 1;
+  const runner = Runner.create();
+
+  const WALL = 120;
+  let walls = [], ceiling = null;
+
+  function buildWalls() {
+    Composite.remove(world, walls);
+    if (ceiling) { Composite.remove(world, ceiling); }
+    const o = { isStatic:true, restitution:1, friction:0, label:'wall' };
+    walls = [
+      Bodies.rectangle(-WALL/2, H/2, WALL, H*4, o),          // left
+      Bodies.rectangle(W + WALL/2, H/2, WALL, H*4, o),       // right
+      Bodies.rectangle(W/2, H + WALL/2, W*3, WALL, o)        // bottom
+    ];
+    ceiling = Bodies.rectangle(W/2, -WALL/2, W*3, WALL, o);
+    Composite.add(world, walls);
+    ceilingOn = false;
+    updateCeiling();
+  }
+  let ceilingOn = false;
+  // Top is open under downward gravity; closed otherwise so marbles don't escape.
+  function updateCeiling() {
+    const need = engine.gravity.y <= 0;
+    if (need && !ceilingOn) { Composite.add(world, ceiling); ceilingOn = true; }
+    if (!need && ceilingOn) { Composite.remove(world, ceiling); ceilingOn = false; }
+  }
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#0a0a0f'; ctx.fillRect(0, 0, W, H);
+    buildWalls();
+    bumpers.forEach(b => clampBumper(b));
+  }
+
+  /* ---------- Music: C major pentatonic, two octaves ---------- */
+  const NOTES = [
+    ['C4',261.63],['D4',293.66],['E4',329.63],['G4',392.00],['A4',440.00],
+    ['C5',523.25],['D5',587.33],['E5',659.25],['G5',783.99],['A5',880.00]
+  ];
+  const noteColor = i => `hsl(${(i * 36 + 170) % 360}, 100%, 60%)`;
+
+  /* ---------- Bumpers ---------- */
+  const bumpers = [];
+  let noteCounter = 0;
+  const MAX_BUMPERS = 20;
+
+  function makeBumper(type, x, y, angle) {
+    const idx = noteCounter++ % NOTES.length;
+    const opts = { isStatic:true, restitution:0.9, friction:0, label:'bumper' };
+    let b;
+    switch (type) {
+      case 'circle':   b = Bodies.circle(x, y, 38, opts); break;
+      case 'pin':      b = Bodies.circle(x, y, 14, opts); break;
+      case 'rect':     b = Bodies.rectangle(x, y, 120, 22, opts); break;
+      case 'triangle': b = Bodies.polygon(x, y, 3, 46, opts); break;
+      case 'hex':      b = Bodies.polygon(x, y, 6, 40, opts); break;
+    }
+    if (angle) Body.rotate(b, angle);
+    b.shape = type; b.noteIdx = idx; b.hitAt = -1e9; b.lastSound = 0;
+    b.color = noteColor(idx);
+    bumpers.push(b);
+    Composite.add(world, b);
+    return b;
+  }
+
+  function bumperRadius(b) { return Math.max(b.bounds.max.x - b.bounds.min.x, b.bounds.max.y - b.bounds.min.y) / 2; }
+  function clampBumper(b) {
+    const r = bumperRadius(b);
+    const x = Math.min(Math.max(b.position.x, r + 4), W - r - 4);
+    const y = Math.min(Math.max(b.position.y, r + 4), H - r - 4);
+    if (x !== b.position.x || y !== b.position.y) Body.setPosition(b, { x, y });
+  }
+
+  function initBumpers() {
+    const layout = [
+      ['rect',     0.30, 0.22,  0.5],
+      ['circle',   0.62, 0.18,  0],
+      ['triangle', 0.80, 0.34,  0.3],
+      ['pin',      0.48, 0.34,  0],
+      ['rect',     0.20, 0.45, -0.5],
+      ['hex',      0.45, 0.52,  0],
+      ['circle',   0.72, 0.58,  0],
+      ['pin',      0.12, 0.68,  0],
+      ['rect',     0.58, 0.76, -0.4],
+      ['triangle', 0.30, 0.78,  0]
+    ];
+    layout.forEach(([t, fx, fy, a]) => makeBumper(t, fx * W, fy * H, a));
+  }
+
+  function addRandomBumper() {
+    if (bumpers.length >= MAX_BUMPERS) return;
+    const types = ['circle','rect','triangle','hex','pin'];
+    const t = types[Math.floor(Math.random() * types.length)];
+    const b = makeBumper(t, W * (0.15 + Math.random() * 0.7), H * (0.2 + Math.random() * 0.5),
+                         t === 'rect' ? (Math.random() - 0.5) : 0);
+    b.hitAt = performance.now(); // little pop on spawn
+  }
+
+  /* ---------- Marbles ---------- */
+  const marbles = [];
+  const MAX_MARBLES = 70;
+  const zeroG = () => engine.gravity.y === 0;
+
+  function spawnMarble(x, y, vx = 0, vy = 0) {
+    const hue = Math.floor(Math.random() * 360);
+    const m = Bodies.circle(x, y, 9, {
+      restitution:0.9, friction:0, frictionAir:0.0008, density:0.002, label:'marble',
+      collisionFilter:{ group:-1 }   // marbles pass through each other
+    });
+    m.hue = hue;
+    Body.setVelocity(m, { x:vx, y:vy });
+    if (zeroG()) nudge(m);
+    marbles.push(m);
+    Composite.add(world, m);
+    if (marbles.length > MAX_MARBLES) Composite.remove(world, marbles.shift());
+  }
+
+  function nudge(m) {
+    const a = Math.random() * Math.PI * 2, s = 2.5 + Math.random() * 2.5;
+    Body.setVelocity(m, { x:Math.cos(a) * s, y:Math.sin(a) * s });
+  }
+
+  function autoDrop() {
+    const g = engine.gravity.y;
+    const x = W / 2 + (Math.random() - 0.5) * 30;
+    if (g > 0) spawnMarble(x, -20, (Math.random() - 0.5) * 0.6, 0);
+    else if (g < 0) spawnMarble(x, H - 30, (Math.random() - 0.5) * 0.6, 0);
+    else spawnMarble(x, 40, 0, 0);
+  }
+
+  function clearMarbles() {
+    marbles.forEach(m => Composite.remove(world, m));
+    marbles.length = 0;
+  }
+
+  // Keep things alive in Zero-G, and clean up strays.
+  Events.on(engine, 'beforeUpdate', () => {
+    const z = zeroG();
+    for (let i = marbles.length - 1; i >= 0; i--) {
+      const m = marbles[i];
+      if (m.position.y > H + 300 || m.position.y < -400 || m.position.x < -300 || m.position.x > W + 300) {
+        Composite.remove(world, m); marbles.splice(i, 1); continue;
+      }
+      if (z) {
+        const sp = Math.hypot(m.velocity.x, m.velocity.y);
+        if (sp < 2.5) {
+          if (sp < 0.05) nudge(m);
+          else Body.setVelocity(m, { x:m.velocity.x / sp * 2.5, y:m.velocity.y / sp * 2.5 });
+        }
+      }
+    }
+  });
+
+  /* ---------- Audio ---------- */
+  let audio = null;
+  function initAudio() {
+    if (audio) { if (audio.ctx.state === 'suspended') audio.ctx.resume(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ac = new AC();
+    const master = ac.createGain(); master.gain.value = 0.7;
+    const comp = ac.createDynamicsCompressor();
+    comp.threshold.value = -18; comp.ratio.value = 6; comp.attack.value = 0.003; comp.release.value = 0.2;
+    // lo-fi echo
+    const delay = ac.createDelay(1.0); delay.delayTime.value = 0.33;
+    const fb = ac.createGain(); fb.gain.value = 0.35;
+    const tone = ac.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 1800;
+    const wet = ac.createGain(); wet.gain.value = 0.3;
+    delay.connect(tone); tone.connect(fb); fb.connect(delay); tone.connect(wet);
+    master.connect(comp); wet.connect(comp); comp.connect(ac.destination);
+    audio = { ctx:ac, master, delay };
+    ac.resume();
+  }
+
+  function playNote(freq, intensity, type) {
+    if (!audio) return;
+    const ac = audio.ctx, t = ac.currentTime;
+    const peak = 0.06 + 0.2 * intensity;
+    const osc = ac.createOscillator();
+    osc.type = (type === 'rect' || type === 'triangle') ? 'triangle' : 'sine';
+    osc.frequency.value = freq;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(peak, t + 0.01);            // fast attack
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.01 + 0.4); // smooth decay
+    osc.connect(g); g.connect(audio.master); g.connect(audio.delay);
+    osc.start(t); osc.stop(t + 0.5);
+    // soft octave shimmer
+    const o2 = ac.createOscillator(); o2.type = 'sine'; o2.frequency.value = freq * 2;
+    const g2 = ac.createGain();
+    g2.gain.setValueAtTime(0.0001, t);
+    g2.gain.linearRampToValueAtTime(peak * 0.25, t + 0.01);
+    g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
+    o2.connect(g2); g2.connect(audio.master);
+    o2.start(t); o2.stop(t + 0.3);
+  }
+
+  /* ---------- Collisions, ripples ---------- */
+  const ripples = [];
+  Events.on(engine, 'collisionStart', ev => {
+    const now = performance.now();
+    for (const pair of ev.pairs) {
+      let m = null, b = null;
+      if (pair.bodyA.label === 'marble' && pair.bodyB.label === 'bumper') { m = pair.bodyA; b = pair.bodyB; }
+      else if (pair.bodyB.label === 'marble' && pair.bodyA.label === 'bumper') { m = pair.bodyB; b = pair.bodyA; }
+      if (!m) continue;
+      const speed = Math.hypot(m.velocity.x, m.velocity.y);
+      b.hitAt = now;
+      const c = pair.collision.supports && pair.collision.supports[0] || m.position;
+      ripples.push({ x:c.x, y:c.y, t:now, color:b.color });
+      if (ripples.length > 60) ripples.shift();
+      if (speed > 0.6 && now - b.lastSound > 50) {
+        b.lastSound = now;
+        playNote(NOTES[b.noteIdx][1], Math.min(speed / 14, 1), b.shape);
+      }
+    }
+  });
+
+  /* ---------- Rendering ---------- */
+  function bodyPath(b, s) {
+    if (b.circleRadius) { ctx.beginPath(); ctx.arc(b.position.x, b.position.y, b.circleRadius * s, 0, Math.PI * 2); return; }
+    ctx.beginPath();
+    b.vertices.forEach((v, i) => {
+      const x = b.position.x + (v.x - b.position.x) * s, y = b.position.y + (v.y - b.position.y) * s;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.closePath();
+  }
+
+  const HIT_MS = 320;
+  function draw(now) {
+    // translucent clear leaves soft motion trails
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(10,10,15,0.28)';
+    ctx.fillRect(0, 0, W, H);
+
+    // bumpers
+    for (const b of bumpers) {
+      const k = Math.max(0, 1 - (now - b.hitAt) / HIT_MS);        // 1 -> 0
+      const e = k * k;
+      bodyPath(b, 1 + 0.28 * e);   // pop out, then shrink back to normal
+      ctx.shadowColor = e > 0.05 ? '#fff' : b.color;
+      ctx.shadowBlur = 14 + 30 * e;
+      ctx.fillStyle = e > 0.02 ? `rgba(255,255,255,${0.15 + 0.85 * e})` : 'rgba(255,255,255,0.04)';
+      ctx.fill();
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = e > 0.4 ? '#fff' : b.color;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      // note label
+      ctx.fillStyle = b.color; ctx.globalAlpha = 0.55;
+      ctx.font = '10px "Segoe UI", sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      if (b.shape !== 'pin') ctx.fillText(NOTES[b.noteIdx][0], b.position.x, b.position.y);
+      ctx.globalAlpha = 1;
+    }
+
+    // ripples
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const r = ripples[i], p = (now - r.t) / 900;
+      if (p >= 1) { ripples.splice(i, 1); continue; }
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, 6 + p * 70, 0, Math.PI * 2);
+      ctx.strokeStyle = r.color; ctx.globalAlpha = (1 - p) * 0.8; ctx.lineWidth = 2.5 * (1 - p) + 0.5;
+      ctx.shadowColor = r.color; ctx.shadowBlur = 12;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+
+    // marbles
+    for (const m of marbles) {
+      const col = `hsl(${m.hue},100%,65%)`;
+      ctx.beginPath();
+      ctx.arc(m.position.x, m.position.y, 9, 0, Math.PI * 2);
+      ctx.shadowColor = col; ctx.shadowBlur = 18;
+      ctx.fillStyle = col; ctx.fill();
+      ctx.beginPath();
+      ctx.arc(m.position.x - 2.5, m.position.y - 2.5, 3, 0, Math.PI * 2);
+      ctx.shadowBlur = 0; ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.shadowBlur = 0;
+  }
+
+  function loop(now) { draw(now); requestAnimationFrame(loop); }
+
+  /* ---------- Pointer interaction ---------- */
+  let drag = null;
+  const pt = e => ({ x:e.clientX, y:e.clientY });
+  const bumperAt = p => {
+    // Query.point is exact; add a small tolerance for thin pins
+    let hit = Query.point(bumpers, p);
+    if (hit.length) return hit[hit.length - 1];
+    return bumpers.find(b => Math.hypot(b.position.x - p.x, b.position.y - p.y) < (b.circleRadius || 0) + 6) || null;
+  };
+
+  canvas.addEventListener('pointerdown', e => {
+    initAudio();
+    const p = pt(e);
+    const b = bumperAt(p);
+    if (b) {
+      drag = { b, dx:b.position.x - p.x, dy:b.position.y - p.y };
+      canvas.setPointerCapture(e.pointerId);
+      canvas.style.cursor = 'grabbing';
+    } else {
+      spawnMarble(p.x, p.y, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2);
+    }
+  });
+  canvas.addEventListener('pointermove', e => {
+    const p = pt(e);
+    if (drag) {
+      Body.setPosition(drag.b, { x:p.x + drag.dx, y:p.y + drag.dy });
+      clampBumper(drag.b);
+    } else {
+      canvas.style.cursor = bumperAt(p) ? 'grab' : 'crosshair';
+    }
+  });
+  const endDrag = e => { drag = null; canvas.style.cursor = 'crosshair'; };
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+
+  canvas.addEventListener('dblclick', e => {
+    const b = bumperAt(pt(e));
+    if (b && b.shape === 'rect') {
+      Body.rotate(b, Math.PI / 4);
+      clampBumper(b);
+      b.hitAt = performance.now();
+    }
+  });
+
+  /* ---------- UI ---------- */
+  const gButtons = document.querySelectorAll('button[data-g]');
+  gButtons.forEach(btn => btn.addEventListener('click', () => {
+    initAudio();
+    gButtons.forEach(x => x.classList.remove('active'));
+    btn.classList.add('active');
+    const g = parseFloat(btn.dataset.g);
+    engine.gravity.y = g;
+    updateCeiling();
+    if (g === 0) marbles.forEach(nudge);   // float and bounce forever
+  }));
+
+  let autoTimer = null;
+  const autoBtn = document.getElementById('auto');
+  autoBtn.addEventListener('click', () => {
+    initAudio();
+    if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+    else { autoDrop(); autoTimer = setInterval(autoDrop, 1500); }
+    autoBtn.classList.toggle('active', !!autoTimer);
+    autoBtn.textContent = 'Auto-Spawner: ' + (autoTimer ? 'On' : 'Off');
+  });
+  document.getElementById('add').addEventListener('click', () => { initAudio(); addRandomBumper(); });
+  document.getElementById('clear').addEventListener('click', clearMarbles);
+
+  const overlay = document.getElementById('overlay');
+  overlay.addEventListener('click', () => {
+    initAudio();
+    overlay.classList.add('hide');
+    setTimeout(() => overlay.remove(), 700);
+  });
+
+  /* ---------- Boot ---------- */
+  window.addEventListener('resize', resize);
+  resize();
+  initBumpers();
+  Runner.run(runner, engine);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
